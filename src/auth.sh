@@ -4,6 +4,7 @@
 # Function to login to Azure using Azure CLI
 function azLogin() {
     local auth_method=$1
+
     case $auth_method in
         service-principal)
             echo "Logging in using service principal..."
