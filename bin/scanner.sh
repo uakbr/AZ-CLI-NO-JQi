@@ -2,10 +2,10 @@
 # bin/scanner.sh
 
 # Import functions from other scripts
-source ../src/auth.sh
-source ../src/collect.sh
-source ../src/analyze.sh
-source ../src/report.sh
+source src/auth.sh
+source src/collect.sh
+source src/analyze.sh
+source src/report.sh
 
 # Define supported resource types
 resource_types=(
