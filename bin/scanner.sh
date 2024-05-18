@@ -68,13 +68,64 @@ resource_types=(
 # Define checkpoint frequency
 CHECKPOINT_FREQUENCY=5
 
+# Define timeout duration and maximum number of retries
+TIMEOUT_DURATION=60
+MAX_RETRIES=3
+
 # Define progress bar function
 function progress_bar() {
   local current=$1
   local total=$2
+  local resource_type=$3
+  local total_resource_types=$4
   local bar_width=50
   local progress=$((current * bar_width / total))
-  printf "Progress: [%-${bar_width}s] %d%%\\r" "$(printf '#%.0s' $(seq 1 $progress))" $((current * 100 / total))
+  local percentage=$((current * 100 / total))
+  printf "Progress: [%-${bar_width}s] %d%% - Resource Type: %s (%d/%d)\r" "$(printf '#%.0s' $(seq 1 $progress))" $percentage "$resource_type" $current $total_resource_types
+}
+
+# Function to initialize the SQLite database
+function initializeDatabase() {
+  sqlite3 checkpoint.db <<EOF
+CREATE TABLE IF NOT EXISTS checkpoints (
+  subscription_index INTEGER PRIMARY KEY,
+  data TEXT,
+  findings TEXT
+);
+EOF
+}
+
+# Function to save checkpoint data to SQLite database
+function saveCheckpoint() {
+  local sub_index=$1
+  local data="${DATA[@]}"
+  local findings="${FINDINGS[@]}"
+
+  sqlite3 checkpoint.db <<EOF
+REPLACE INTO checkpoints (subscription_index, data, findings)
+VALUES ($sub_index, '$data', '$findings');
+EOF
+}
+
+# Function to load checkpoint data from SQLite database
+function loadCheckpoint() {
+  local sub_index=$1
+  local checkpoint=$(sqlite3 checkpoint.db "SELECT data, findings FROM checkpoints WHERE subscription_index = $sub_index;")
+
+  if [[ -n "$checkpoint" ]]; then
+    IFS='|' read -r data findings <<< "$checkpoint"
+    DATA=($data)
+    FINDINGS=($findings)
+    return 0
+  else
+    return 1
+  fi
+}
+
+# Function to remove checkpoint data from SQLite database
+function removeCheckpoint() {
+  local sub_index=$1
+  sqlite3 checkpoint.db "DELETE FROM checkpoints WHERE subscription_index = $sub_index;"
 }
 
 # Parse command line arguments
@@ -115,6 +166,12 @@ FINDINGS=()
 # Initialize errors array
 errors=()
 
+# Get total number of resource types
+total_resource_types=${#resource_types[@]}
+
+# Initialize the SQLite database
+initializeDatabase
+
 # Loop through selected subscriptions
 total_subs=${#subscription_ids[@]}
 for ((sub_index=0; sub_index<total_subs; sub_index++)); do
@@ -139,20 +196,22 @@ for ((sub_index=0; sub_index<total_subs; sub_index++)); do
   for ((res_index=0; res_index<total_resources; res_index++)); do
     resource_type=${resource_types[$res_index]}
     echo "Collecting data for resource type: $resource_type"
-    progress_bar $((res_index+1)) $total_resources
+    progress_bar $((res_index+1)) $total_resources "$resource_type" $total_resource_types
     
     # Call the respective data collection function based on resource type and append results to data array
-    resource_data=$(collect_"${resource_type//\//_}" 2>/dev/null)
-    if [[ $? -ne 0 ]]; then
-      echo "Error collecting data for resource type: $resource_type"
-      errors+=("Error collecting data for resource type: $resource_type")
-      continue
-    fi
-    
-    DATA+=("$resource_data")
+    for ((retry=1; retry<=MAX_RETRIES; retry++)); do
+      timeout $TIMEOUT_DURATION bash -c "resource_data=\$(collect_\"${resource_type//\//_}\" 2>/dev/null)"
+      if [[ $? -eq 0 ]]; then
+        DATA+=("$resource_data")
+        break
+      else
+        echo "Error collecting data for resource type: $resource_type. Retry $retry/$MAX_RETRIES."
+        sleep $((retry * 2))
+      fi
+    done
     
     # Save checkpoint if checkpoint frequency is reached
-    if [[ $(( (res_index+1) % CHECKPOINT_FREQUENCY )) -eq 0 ]]; then
+    if [[ $(( (res_index+1) % "$CHECKPOINT_FREQUENCY" )) -eq 0 ]]; then
       saveCheckpoint $sub_index
     fi
   done
@@ -166,6 +225,9 @@ for ((sub_index=0; sub_index<total_subs; sub_index++)); do
     echo "Error analyzing data for subscription $sub_name (ID: $sub_id). Please check the error log for more details."
     errors+=("Error analyzing data for subscription $sub_name (ID: $sub_id)")
   fi
+  
+  # Save checkpoint after processing the subscription
+  saveCheckpoint $sub_index
   
   # Remove checkpoint after processing the subscription
   removeCheckpoint $sub_index
